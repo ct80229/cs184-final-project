@@ -2,16 +2,19 @@
 
 // BufferManager — allocates and manages all GPU buffers for the simulation.
 //
-// OpenGL SSBOs hold particle data and are shared with OpenCL via CL/GL interop
-// (clCreateFromGLBuffer). No CPU readback is needed per frame.
+// All particle/spring/thickness data lives in GL_ARRAY_BUFFER objects (not SSBOs;
+// GL_SHADER_STORAGE_BUFFER requires OpenGL 4.3 which is unavailable on macOS 4.1).
+// Buffers are shared with OpenCL via clCreateFromGLBuffer — no CPU readback per frame.
 //
-// OpenGL SSBO / UBO binding assignments (must match GLSL/CL declarations):
-//   binding 0 — particle positions A  (ping-pong read)
-//   binding 1 — particle positions B  (ping-pong write)
-//   binding 2 — (unused here; velocities stored inline in particle struct)
-//   binding 3 — SimParams UBO
-//   binding 4 — springs index buffer
-//   binding 5 — per-face thickness output
+// SimParams is a separate CL-only buffer (clCreateBuffer); it is NOT a GL UBO for
+// the compute pipeline.  A GL_UNIFORM_BUFFER is allocated for binding 3 as a
+// placeholder for future vertex/fragment shader access.
+//
+// GL buffer roles (no fixed binding slots — accessed by GL ID or CL handle):
+//   posA / posB  — ping-pong particle buffers (Particle = vec4 pos + vec4 vel, 32 bytes)
+//   springs      — spring topology (indexA, indexB, restLen, pad = 16 bytes each)
+//   thickness    — per-face thickness output (float, 4 bytes each)
+//   paramsUBO    — GL_UNIFORM_BUFFER binding 3 (placeholder)
 
 #include <OpenGL/gl3.h>
 #include <OpenCL/opencl.h>
@@ -21,35 +24,36 @@ public:
     BufferManager();
     ~BufferManager();
 
-    // TODO: Allocate two GL SSBOs (posA, posB) for ping-pong particle data.
-    //       Each element is Particle { vec4 pos; vec4 vel; } = 32 bytes (std430).
-    //       Binds posA to binding 0, posB to binding 1.
+    // Allocates two GL_ARRAY_BUFFER objects (posA, posB) for ping-pong particle data.
+    // Each element is Particle { vec4 pos; vec4 vel; } = 32 bytes.
     void allocateParticleBuffers(int numParticles);
 
-    // TODO: Allocate SimParams UBO (binding 3); size = sizeof(SimParams).
+    // Allocates a GL_UNIFORM_BUFFER for SimParams (binding 3).
+    // SimParams are passed to CL kernels separately via clEnqueueWriteBuffer.
     void allocateParamsUBO();
 
-    // TODO: Allocate springs SSBO (binding 4).
-    //       Each element: int indexA, int indexB, float restLen, float pad = 16 bytes.
+    // Allocates a GL_ARRAY_BUFFER for spring data.
+    // Each element: int indexA, int indexB, float restLen, float pad = 16 bytes.
     void allocateSpringBuffer(int numSprings);
 
-    // TODO: Allocate per-face thickness output SSBO (binding 5).
-    //       Each element: float thickness_nm = 4 bytes.
+    // Allocates a GL_ARRAY_BUFFER for per-face thickness output.
+    // Each element: float thickness_nm = 4 bytes.
     void allocateThicknessBuffer(int numFaces);
 
-    // TODO: Create CL cl_mem wrappers from all GL SSBOs via clCreateFromGLBuffer.
-    //       Must be called after all GL buffers are allocated and before first CL dispatch.
+    // Creates CL cl_mem wrappers from all shared GL buffers via clCreateFromGLBuffer.
+    // Must be called after all GL buffers are allocated and before the first CL dispatch.
     void createCLBuffers(cl_context ctx);
 
-    // TODO: Acquire GL buffers for CL use — call before each frame's CL dispatches.
-    //       (clEnqueueAcquireGLObjects on posA, posB, springs, thickness)
+    // Acquires the four shared GL buffers for CL use (clEnqueueAcquireGLObjects).
+    // No GL operations may touch these buffers until releaseFromCL().
     void acquireForCL(cl_command_queue queue);
 
-    // TODO: Release GL buffers back to OpenGL — call after all CL dispatches,
-    //       before glDrawElements. (clEnqueueReleaseGLObjects)
+    // Returns the shared GL buffers back to OpenGL (clEnqueueReleaseGLObjects).
+    // Call clFinish (via ComputePipeline::finish) before any glDraw* call.
     void releaseFromCL(cl_command_queue queue);
 
-    // TODO: Swap ping-pong roles — exchange posA↔posB (both GL names and CL handles).
+    // Swaps ping-pong roles — exchanges posA↔posB GL IDs and CL handles.
+    // Must be called after each CL kernel write so posA always holds the latest result.
     void swapPingPong();
 
     // ── GL buffer accessors ───────────────────────────────────────────────────

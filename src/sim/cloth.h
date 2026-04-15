@@ -16,23 +16,23 @@ public:
     explicit Cloth(int gridSize = 64);
     ~Cloth();
 
-    // TODO: Build rest-position grid; set corner particles pinned by writing
-    //       mass_inv = 0.0 into pos.w of the four corner entries.
+    // Builds the N×N rest-position grid (XZ plane at y=0.7, spanning ±0.6).
+    // All particles are free (mass_inv = 1.0); no corners are pinned.
     void init();
 
-    // TODO: Populate m_springs with structural (grid edges), shear (diagonals),
-    //       and bend (skip-one neighbor) springs; compute rest lengths from grid spacing.
+    // Populates m_springs with structural (grid edges), shear (diagonals),
+    // and bend (skip-one neighbor) springs; computes rest lengths from grid spacing.
     void buildSprings();
 
-    // TODO: Upload rest positions (Particle structs) to posBufferA and posBufferB,
-    //       and spring data to the springs SSBO via BufferManager.
+    // Uploads rest positions (Particle structs) to posBufferA and posBufferB,
+    // and spring data to the springs buffer via BufferManager.
     void uploadToGPU(BufferManager& buffers);
 
-    // TODO: Re-upload rest positions to posBufferA — called on 'R' key press.
+    // Re-uploads rest positions to posBufferA and posBufferB — called on 'R' key press.
     void resetToRest(BufferManager& buffers);
 
-    // TODO: glGetBufferSubData from posBufferA into m_cpuPositions.
-    //       Called once at the start of a mouse grab (acceptable 1-frame latency).
+    // Reads current particle positions from posBufferA into m_cpuPositions via
+    // glGetBufferSubData. Called once at the start of a mouse grab (1-frame latency).
     void syncPositionsFromGPU(BufferManager& buffers);
 
     // Accessors

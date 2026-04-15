@@ -49,15 +49,15 @@ inline SimParams defaultSimParams()
 {
     SimParams p{};
     p.dt             = 1.0f / 60.0f;
-    p.substeps       = 12;
-    p.stiffness      = 50.0f;
+    p.substeps       = 16;
+    p.stiffness      = 100.0f;
     p.bend_stiffness = 20.0f;
     p.damping        = 0.98f;
     p.gravity        = 9.8f;
     p.pad0           = 0.0f;
     p.pad1           = 0.0f;
     p.sphere         = glm::vec4(0.0f, -0.5f, 0.0f, 0.5f); // centered below cloth
-    p.adhesion_k     = 0.1f * p.stiffness;                  // 5.0
+    p.adhesion_k     = 0.1f * p.stiffness;                  // 10.0
     p.adhesion_radius= 0.04f;                               // ~2× spacing at 64×64
     p.grab_particle  = -1;
     p.pad2           = 0.0f;

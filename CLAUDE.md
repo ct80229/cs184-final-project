@@ -17,7 +17,7 @@ The wrap drapes over a rigid bowl object and adheres to surfaces.
 ## Tech Stack
 
 - **Language:** C++17
-- **GPU API:** OpenGL 4.3 — compute shaders (SSBOs), vertex/fragment pipeline
+- **GPU API:** OpenGL 4.1 (vertex/fragment pipeline) + OpenCL (all GPU compute)
 - **Windowing:** GLFW 3.x (window, input, OpenGL context)
 - **Math:** GLM (OpenGL Mathematics library)
 - **UI:** Dear ImGui (parameter sliders, debug overlays)
@@ -36,18 +36,18 @@ The wrap drapes over a rigid bowl object and adheres to surfaces.
 ├── src/
 │   ├── main.cpp                # Entry point: GLFW init, render loop, input
 │   ├── gpu/
-│   │   ├── compute_pipeline.cpp/.h   # Compute shader dispatch wrappers
+│   │   ├── compute_pipeline.cpp/.h   # OpenCL kernel dispatch wrappers
 │   │   ├── render_pipeline.cpp/.h    # Vertex/fragment pipeline setup
-│   │   └── buffer_manager.cpp/.h     # SSBO allocation, ping-pong helpers
+│   │   └── buffer_manager.cpp/.h     # GL_ARRAY_BUFFER allocation for CL interop, ping-pong helpers
 │   ├── sim/
 │   │   ├── cloth.cpp/.h        # Particle/spring mesh, rest state init
 │   │   ├── params.h            # Physics constants (stiffness, damping, gravity)
 │   │   └── interaction.cpp/.h  # Mouse raycasting, grab constraint injection
 │   ├── shaders/
-│   │   ├── integrate.comp      # Verlet integration + sphere SDF collision
-│   │   ├── constraints.comp    # PBD spring constraint solver
-│   │   ├── thickness.comp      # Per-face area ratio → thickness_nm
-│   │   ├── adhesion.comp       # Park & Byun cohesion spring forces
+│   │   ├── integrate.cl        # OpenCL: Verlet integration + sphere SDF collision
+│   │   ├── constraints.cl      # OpenCL: PBD spring constraint solver
+│   │   ├── thickness.cl        # OpenCL: Per-face area ratio → thickness_nm
+│   │   ├── adhesion.cl         # OpenCL: Park & Byun cohesion spring forces
 │   │   ├── cloth.vert          # Cloth mesh vertex shader
 │   │   └── cloth.frag          # Thin-film interference fragment shader
 │   └── render/
@@ -90,76 +90,101 @@ CMake minimum required version: **3.20**. Requires a compiler with C++17 support
 
 ## OpenGL / GLSL Conventions
 
-- **OpenGL version:** 4.3 core profile (required for compute shaders)
-- **Compute shaders:** use SSBOs (`layout(std430, binding = N)`) — not UBOs
-- **Workgroup size:** `layout(local_size_x = 64)` — safe for Intel integrated GPU
-- **Binding slots:**
-  - binding 0 = particle positions A (ping-pong read)
-  - binding 1 = particle positions B (ping-pong write)
-  - binding 2 = velocities
-  - binding 3 = sim params UBO
-  - binding 4 = springs index buffer
-  - binding 5 = face thickness output
-- **Sync between dispatches:** always call `glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)`
-  between consecutive compute dispatches that share an SSBO
-- **Shader loading:** load `.comp`/`.vert`/`.frag` files at runtime from the
-  `src/shaders/` directory — do NOT hardcode shader source as C++ string literals
-- **Error checking:** wrap every `glDraw*` and `glDispatchCompute` call with
-  a `CHECK_GL_ERROR()` macro in debug builds
+- **OpenGL version:** 4.1 core profile (macOS maximum — no compute shaders, no SSBOs)
+- **All GPU compute:** OpenCL kernels (`.cl`) — never `glDispatchCompute` or `GL_SHADER_STORAGE_BUFFER`
+- **CL workgroup size:** 64 — safe for Intel UHD 630, multiple of preferred SIMD-8/16 width
+- **CL kernel argument slots** — velocities are stored inline in the Particle struct,
+  so there is no separate velocity buffer. Actual per-kernel layouts:
+  - `integrate.cl`:   arg 0=posIn, arg 1=posOut, arg 2=params, arg 3=errorCount, arg 4=numParticles
+  - `constraints.cl`: arg 0=posIn, arg 1=posOut, arg 2=springs, arg 3=params, arg 4=numSprings, arg 5=reverseOrder, arg 6=numParticles
+  - `thickness.cl`:   arg 0=pos, arg 1=faceIndices, arg 2=thicknessOut, arg 3=numFaces (Sprint 3)
+  - `adhesion.cl`:    arg 0=pos, arg 1=vel, arg 2=params, arg 3=numParticles (Sprint 3)
+- **Sync between CL and GL:** `clEnqueueAcquireGLObjects` before dispatch,
+  `clEnqueueReleaseGLObjects` + `clFinish` before any `glDraw*` call.
+  Do NOT use `glMemoryBarrier` for CL/GL sync — it has no effect on CL queues.
+- **Vertex shader particle access:** particle buffers are `GL_ARRAY_BUFFER` objects
+  wrapped via TBO (`GL_TEXTURE_BUFFER`, OpenGL 3.1+). Bind as `GL_TEXTURE_BUFFER`,
+  sample in the vertex shader with `texelFetch(posBuffer, gl_VertexID * 2)` for pos
+  and `texelFetch(posBuffer, gl_VertexID * 2 + 1)` for vel. Format: `GL_RGBA32F`.
+  Do NOT use `GL_SHADER_STORAGE_BUFFER` (requires 4.3).
+- **Shader loading:** load `.vert`/`.frag` files at runtime from `src/shaders/`;
+  load `.cl` source the same way for OpenCL programs. Never hardcode source strings.
+- **Error checking:** `CHECK_GL_ERROR()` after every `glDraw*`; `CHECK_CL_ERROR(err)`
+  after every CL call. Both macros are defined in `src/gpu/gl_check.h`.
 
 ---
 
-## Particle Buffer Layout (GLSL struct, std430)
+## Particle Buffer Layout
 
-```glsl
-// Must match the C++ struct in sim/cloth.h exactly
-struct Particle {
-    vec4 pos;   // xyz = world position, w = mass_inv (0.0 = pinned)
-    vec4 vel;   // xyz = velocity, w = flags (bit0=surface contact, bit1=grabbed)
-};
+Each particle is 32 bytes (two `float4` / `vec4`):
+
+```c
+// C++ / OpenCL (.cl) layout — must match sim/cloth.h exactly
+// float4 pos: xyz = world position, w = mass_inv (0.0 = pinned)
+// float4 vel: xyz = velocity,       w = flags (bit0=surface contact, bit1=grabbed)
 ```
 
-Use `vec4` to avoid std430 alignment surprises — `vec3` in an SSBO has 16-byte
-alignment but only 12-byte size; padding bugs are silent and hard to diagnose.
+```glsl
+// GLSL vertex shader access via TBO (texelFetch):
+// particle i occupies texels [i*2] and [i*2+1]
+vec4 pos = texelFetch(uPosTBO, gl_VertexID * 2);
+vec4 vel = texelFetch(uPosTBO, gl_VertexID * 2 + 1);
+```
+
+Use `float4`/`vec4` (not `float3`/`vec3`) — avoids alignment padding bugs that
+are silent and hard to diagnose.
 
 ---
 
-## Key Uniforms (`SimParams` UBO)
+## Key Uniforms (`SimParams`)
 
-```glsl
-layout(std140, binding = 3) uniform SimParams {
+`SimParams` is a **plain CL buffer** (`clCreateBuffer` + `clEnqueueWriteBuffer`),
+not a GL UBO — it is never read by the vertex/fragment shaders directly.
+
+```c
+// C struct — upload via clEnqueueWriteBuffer every frame before dispatch
+typedef struct {
     float dt;               // fixed 1/60s
     int   substeps;         // 8–16
     float stiffness;        // ~50.0 for saran wrap
     float bend_stiffness;   // ~20.0
     float damping;          // 0.98 per substep
     float gravity;          // 9.8
-    float pad0; float pad1; // std140 requires 16-byte row alignment
-    vec4  sphere;           // xyz = center, w = radius
+    float pad0; float pad1; // keep 16-byte alignment
+    float sphere[4];        // xyz = center, w = radius
     float adhesion_k;       // ~0.1 * stiffness
     float adhesion_radius;  // ~2x rest particle spacing
     int   grab_particle;    // index of grabbed particle (-1 = none)
     float pad2;
-    vec4  grab_target;      // xyz = world-space drag target
-};
+    float grab_target[4];   // xyz = world-space drag target
+} SimParams;
 ```
+
+MVP, view, and lighting uniforms for the vertex/fragment shaders are set via
+standard `glUniform*` calls — they do not go through `SimParams`.
 
 ---
 
 ## GPU Pipeline (per frame)
 
 ```
-glDispatchCompute → integrate.comp
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
-glDispatchCompute → constraints.comp   (repeated substeps times)
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
-glDispatchCompute → thickness.comp
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
-glDispatchCompute → adhesion.comp
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
-    glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT)
+clEnqueueAcquireGLObjects(shared CL/GL buffers)
+
+clEnqueueNDRangeKernel → integrate.cl
+clEnqueueNDRangeKernel → constraints.cl  (forward pass)
+clEnqueueNDRangeKernel → constraints.cl  (reverse pass)  × substeps
+clEnqueueNDRangeKernel → thickness.cl
+clEnqueueNDRangeKernel → adhesion.cl
+
+clEnqueueReleaseGLObjects(shared CL/GL buffers)
+clFinish(queue)          ← MUST drain before any GL call
+
 glDrawElements   → cloth.vert + cloth.frag
+glDrawElements   → bowl.vert  + bowl.frag
 ```
+
+`clFinish` is mandatory — `clFlush` is not sufficient. Missing it causes GL to
+draw with stale particle positions from the previous frame.
 
 ---
 
@@ -169,34 +194,37 @@ glDrawElements   → cloth.vert + cloth.frag
 
 - Grid of N×N particles; default N=64
 - Springs: structural (grid edges), shear (diagonals), bend (skip-one neighbor)
-- Rest lengths stored in a separate SSBO alongside a spring index buffer
-- Corner particles pinned by setting `pos.w = 0.0` (mass_inv) in the particle buffer
+- Rest lengths stored alongside the spring index buffer (GL_ARRAY_BUFFER, not SSBO)
+- All particles are currently free (`pos.w = mass_inv = 1.0`); cloth falls freely over the bowl.
+  Re-pinning corners is a one-line change in `cloth.cpp:init()`.
 
-### Integration (`integrate.comp`)
+### Integration (`integrate.cl`)
 
 - Semi-implicit Verlet: `vel += gravity * dt`, `vel *= damping`, `pos += vel * dt`
 - Sphere SDF collision inline: project particle outside sphere surface, zero normal velocity
-- NaN guard: `if (any(isnan(pos.xyz)) || any(greaterThan(abs(pos.xyz), vec3(100.0))))` →
-  reset to rest position, increment an atomic error counter in a single-element SSBO
+- NaN guard: reset to rest position + `atomic_inc` error counter on out-of-bounds pos
+- Skip pinned particles: `if (pos.w == 0.0f) return;`
 
-### Constraint Solving (`constraints.comp`)
+### Constraint Solving (`constraints.cl`)
 
 - Position-Based Dynamics (PBD), not force-based
-- Per substep: iterate all springs, apply correction `Δp = (|d| - rest) / |d| * stiffness * 0.5`
-- Two dispatch passes per substep (forward then reverse spring index order) to reduce directional bias
-- Fixed particles: skip correction when `pos.w == 0.0` (mass_inv field)
-- Use Jacobi-buffered writes (ping-pong between position SSBOs A and B) — do NOT
-  do in-place Gauss-Seidel; workgroup execution order is undefined in OpenGL compute
+- Sprint 2 implementation: serial Gauss-Seidel (`global_size=1`) — deterministic,
+  correct. One work item iterates all springs. Dispatched twice per substep
+  (forward pass then reverse pass via `reverseOrder` flag) to reduce bias.
+- Sprint 4 goal: parallelise via checkerboard graph colouring (independent colour
+  sets dispatched separately). Do NOT implement in-place parallel writes without
+  graph colouring — write races produce exploding cloth.
+- Fixed particles: skip correction when `pos.w == 0.0f`
 
-### Thickness Mapping (`thickness.comp`)
+### Thickness Mapping (`thickness.cl`)
 
 - Per face: `area_deformed = 0.5 * length(cross(ab, ac))`
-- `strain = clamp(area_deformed / rest_area, 0.1, 10.0)`
-- `thickness_nm = 12000.0 / strain`  (12µm rest thickness, conservation of volume)
-- Written to face_thickness SSBO; read as a flat-interpolated per-face value in
-  the fragment shader (`flat in float thickness_nm` in vert/frag pair)
+- `strain = clamp(area_deformed / rest_area, 0.1f, 10.0f)`
+- `thickness_nm = 12000.0f / strain`  (12µm rest thickness, conservation of volume)
+- Written to face_thickness CL/GL buffer; read as a flat-interpolated per-face value
+  in the fragment shader (`flat in float thickness_nm` in vert/frag pair)
 
-### Adhesion (`adhesion.comp`) — Park & Byun §3.2
+### Adhesion (`adhesion.cl`) — Park & Byun §3.2
 
 - Only runs on particles where `floatBitsToUint(vel.w) & 1u != 0u` (surface contact flag)
 - For each contact particle, finds neighbors within `adhesion_radius`
@@ -209,23 +237,24 @@ glDrawElements   → cloth.vert + cloth.frag
 
 ### Iridescence Shader (`cloth.frag`)
 
-Implements Zucconi (2017) thin-film interference model in GLSL:
+Implements thin-film interference using the **Wyman et al. (2013) CIE approximation**
+(preferred over Zucconi — better violet/red rolloff). See `docs/research/thin_film_iridescence.md`
+for the complete GLSL implementation.
 
 ```glsl
-// Gaussian wavelength → RGB (Zucconi §6)
-vec3 wavelength_to_rgb(float lambda);
-
-// OPD = 2.0 * n * d * cos(theta_t)
+// OPD = 2.0 * n * d * cos(theta_t)  (Snell's law for theta_t)
 // Integrate over visible spectrum 380–780nm, 20 samples
-vec3 thin_film_color(float thickness_nm, float n, float cos_theta);
+vec3 thin_film_color(float thickness_nm, float n, float cos_theta_i);
 
-// View-dependent phase shift: modulate by dot(N, V)
-// Base material: near-transparent (alpha 0.85), slight blue-green tint
-// Final mix: mix(base, iridescence, 0.6 + 0.4 * stretch)
+// View-dependent: cos_theta_i = abs(dot(N, V))
+// Base material: near-transparent (alpha 0.75–0.92), slight blue-green tint
+// Final mix: mix(base, iridescence, 0.4 + 0.4*stretch_mix + 0.2*fresnel)
 ```
 
-Refractive index: `n = 1.5` (dry), `n = 1.33` (wet — controlled by ImGui slider).
-Minimum thickness floor: `150.0` nm to prevent invisible regions at rest.
+Refractive index: `n = 1.5` (dry), `n = 1.33` (wet — `n_film` uniform, ImGui slider).
+Thickness is clamped `150–1200 nm` in the shader. Visible iridescence appears at
+150–800 nm (requires 15–80× area stretch — lower stiffness to see it during demo).
+`flat in float thickness_nm` — face value, not interpolated across triangle.
 
 ### Bowl Mesh (`bowl_mesh.cpp`)
 
@@ -267,10 +296,10 @@ compute dispatches. Report results in the writeup.
 
 | Parameter         | Value      | Notes                              |
 |-------------------|------------|------------------------------------|
-| `stiffness`       | 50.0       | Near-inextensible                  |
+| `stiffness`       | 100.0      | scale=1.0 in constraints.cl (was 50 → rubber-like stretch) |
 | `bend_stiffness`  | 20.0       | Floppy but not limp                |
 | `damping`         | 0.98       | Per substep; ImGui: 0.95–0.999     |
-| `substeps`        | 12         | Trade quality vs. perf at 128×128  |
+| `substeps`        | 16         | 32 passes/frame (was 12 → insufficient convergence) |
 | `adhesion_k`      | 0.1×stiff  | Fraction of structural stiffness   |
 | `adhesion_radius` | 2× spacing | ~0.04 world units at 64×64         |
 | `rest_thickness`  | 12000 nm   | 12µm, real saran wrap range        |
@@ -286,7 +315,7 @@ Toggle via keyboard shortcuts in `main.cpp` (GLFW key callbacks):
 - `W` — wireframe overlay (`glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)`)
 - `T` — thickness heatmap (bypasses iridescence, visualizes raw `thickness_nm`)
 - `N` — show surface normals as line segments
-- `R` — reset cloth to rest state (re-upload rest positions to SSBO)
+- `R` — reset cloth to rest state (re-upload rest positions to GL buffer)
 - `P` — pause/resume simulation
 
 The thickness heatmap (`T`) must be verified before the iridescence shader is
@@ -303,9 +332,10 @@ connected — confirms the strain→thickness pipeline produces values in the
   procedural UV hemisphere for rendering. Visually equivalent at demo distance.
 - **No spectral rendering.** Zucconi Gaussian approximation (20 wavelength samples)
   delivers ~90% of the visual result. Full CIE spectral integration is descoped.
-- **`glMemoryBarrier` is mandatory** between compute passes sharing an SSBO.
-  Missing it causes one-frame-stale data, silent wrong results, and intermittent
-  shimmer that is extremely hard to diagnose.
+- **`clFinish` before `glDraw*` is mandatory.** CL/GL sync is `clEnqueueReleaseGLObjects`
+  + `clFinish` — not `glMemoryBarrier` (which has no effect on CL queues). Missing
+  `clFinish` causes GL to draw with stale particle data, producing one-frame-lagged
+  or corrupted positions that are hard to diagnose.
 
 ---
 

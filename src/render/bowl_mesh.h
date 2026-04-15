@@ -17,13 +17,13 @@ public:
     BowlMesh();
     ~BowlMesh();
 
-    // TODO: Generate UV hemisphere (lower half of sphere) with positions, normals, UVs.
-    //       rings = horizontal latitude subdivisions, sectors = longitudinal subdivisions.
-    //       Upload to GPU via glGenBuffers / glBufferData.
+    // Generates a UV sphere mesh with positions, normals, UVs and uploads to GPU.
+    // rings = horizontal latitude subdivisions, sectors = longitudinal subdivisions.
+    // Back-face culling (enabled at draw site) hides the lower hemisphere.
     void init(int rings = 20, int sectors = 20);
 
-    // TODO: Bind shader program, set MVP + light uniforms, draw with Phong shading.
-    //       Shader loaded from disk (src/shaders/bowl.vert + bowl.frag — added in Sprint 3).
+    // Binds the Phong shader, sets model/view/proj/light uniforms, draws with GL_TRIANGLES.
+    // Shader loaded from disk: src/shaders/bowl.vert + bowl.frag.
     void draw(const glm::mat4& model,
               const glm::mat4& view,
               const glm::mat4& proj,
