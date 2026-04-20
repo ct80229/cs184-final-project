@@ -93,7 +93,7 @@ void BufferManager::allocateThicknessBuffer(int numFaces)
 
 void BufferManager::createCLBuffers(cl_context ctx)
 {
-    // Wrap existing GL SSBOs as CL memory objects.
+    // Wrap existing GL buffers as CL memory objects.
     // GL buffers must already be fully allocated (glBufferData called).
     // These buffers are used in an interleaved acquire/release pattern each frame.
     cl_int err;

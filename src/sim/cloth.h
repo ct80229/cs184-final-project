@@ -56,7 +56,7 @@ private:
     // Populated on demand by syncPositionsFromGPU() for raycasting.
     std::vector<glm::vec4> m_cpuPositions;
 
-    // Spring topology — uploaded once to the springs SSBO.
+    // Spring topology — uploaded once to the springs buffer.
     struct Spring {
         int   i;        // particle index A
         int   j;        // particle index B

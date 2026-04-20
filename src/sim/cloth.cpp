@@ -58,7 +58,6 @@ void Cloth::buildSprings()
     m_springs.clear();
 
     auto idx = [&](int r, int c) { return r * N + c; };
-    float spacing = (2.0f * 0.6f) / static_cast<float>(N - 1);
 
     auto addSpring = [&](int i, int j) {
         glm::vec3 pi = glm::vec3(m_restPositions[i]);
@@ -95,7 +94,6 @@ void Cloth::buildSprings()
 
     printf("[Cloth] %d particles, %d springs (grid %dx%d)\n",
            numParticles(), numSprings(), N, N);
-    (void)spacing;
 }
 
 // Build a vector of interleaved Particle structs from rest state.

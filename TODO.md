@@ -157,6 +157,13 @@ Buffer sharing via `cl_mem` / `CGLGetCurrentContext`. Supported on Intel + Apple
       Wire up once `restAreas` buffer and surface-contact detection are implemented (Sprint 3).
 - [ ] Cloth corners not pinned (`mass_inv = 1.0` for all). Decide before final demo whether
       to pin corners for a cleaner drape or keep free-fall for interactive grabbing.
+- [ ] `buffer_manager.cpp::allocateParamsUBO()`: allocates a GL_UNIFORM_BUFFER and binds it
+      to binding 3, but no vertex/fragment shader reads it. The CL pipeline uses a separate
+      `clCreateBuffer` path. Consider removing the GL UBO allocation once SimParams access
+      from GLSL shaders is needed (iridescence shader will need sphere/thickness, not SimParams).
+- [ ] `bowl_mesh.cpp`: duplicates shader compilation helpers (`readShaderFile`, `compileStage`,
+      `linkProgram`) that are also in `RenderPipeline`. If bowl grows in complexity, consider
+      routing through `RenderPipeline` to remove the duplication. Low priority while bowl shader is static.
 
 ---
 

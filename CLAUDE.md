@@ -53,11 +53,7 @@ The wrap drapes over a rigid bowl object and adheres to surfaces.
 │   └── render/
 │       ├── cloth_mesh.cpp/.h   # VAO/VBO setup, draw call
 │       └── bowl_mesh.cpp/.h    # Procedural hemisphere mesh + Phong shader
-├── external/
-│   ├── glfw/                   # GLFW submodule or find_package
-│   ├── glm/                    # GLM header-only
-│   └── imgui/                  # Dear ImGui source
-├── assets/
+├── assets/  # (no external/ dir — GLFW, GLM, ImGui fetched via CMake FetchContent)
 │   └── reference/              # Real saran wrap images for visual comparison
 └── docs/
     ├── proposal.pdf
@@ -97,8 +93,8 @@ CMake minimum required version: **3.20**. Requires a compiler with C++17 support
   so there is no separate velocity buffer. Actual per-kernel layouts:
   - `integrate.cl`:   arg 0=posIn, arg 1=posOut, arg 2=params, arg 3=errorCount, arg 4=numParticles
   - `constraints.cl`: arg 0=posIn, arg 1=posOut, arg 2=springs, arg 3=params, arg 4=numSprings, arg 5=reverseOrder, arg 6=numParticles
-  - `thickness.cl`:   arg 0=pos, arg 1=faceIndices, arg 2=thicknessOut, arg 3=numFaces (Sprint 3)
-  - `adhesion.cl`:    arg 0=pos, arg 1=vel, arg 2=params, arg 3=numParticles (Sprint 3)
+  - `thickness.cl`:   arg 0=pos, arg 1=faceIndices, arg 2=restAreas, arg 3=thicknessOut, arg 4=numFaces (Sprint 3)
+  - `adhesion.cl`:    arg 0=particles (pos+vel combined), arg 1=params, arg 2=numParticles (Sprint 3)
 - **Sync between CL and GL:** `clEnqueueAcquireGLObjects` before dispatch,
   `clEnqueueReleaseGLObjects` + `clFinish` before any `glDraw*` call.
   Do NOT use `glMemoryBarrier` for CL/GL sync — it has no effect on CL queues.
