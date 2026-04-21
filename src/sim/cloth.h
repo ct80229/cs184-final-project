@@ -6,6 +6,7 @@
 // and a CPU mirror of current positions used for mouse-interaction raycasting.
 // All simulation runs on the GPU (OpenCL kernels); this class is CPU-only.
 
+#include <OpenCL/opencl.h>
 #include <glm/glm.hpp>
 #include <vector>
 
@@ -34,6 +35,21 @@ public:
     // Reads current particle positions from posBufferA into m_cpuPositions via
     // glGetBufferSubData. Called once at the start of a mouse grab (1-frame latency).
     void syncPositionsFromGPU(BufferManager& buffers);
+
+    // Computes per-face triangle indices (flat, 3 ints per face) and per-face rest
+    // areas from m_restPositions.  Index order matches ClothMesh::init() EBO exactly
+    // (same r,c loop) so that gl_PrimitiveID == face index in the fragment shader.
+    // Must be called after init().
+    void buildFaceData();
+
+    // Uploads face indices and rest areas as CL-only buffers (clCreateBuffer).
+    // These buffers are read-only by the thickness kernel and never acquired/released
+    // with the GL interop — they are pure CL allocations.
+    // Must be called after buildFaceData() and after the CL context is created.
+    // Caller is responsible for clReleaseMemObject on the returned handles.
+    void uploadFaceDataToCL(cl_context ctx,
+                            cl_mem& outFaceIndices,
+                            cl_mem& outRestAreas);
 
     // Accessors
     int gridSize()    const { return m_gridSize; }
@@ -64,4 +80,10 @@ private:
         float pad;      // std430 alignment pad (16-byte element)
     };
     std::vector<Spring> m_springs;
+
+    // Per-face data computed by buildFaceData() — uploaded to CL via uploadFaceDataToCL().
+    // m_faceIndices: flat int array, 3 ints per face (matching ClothMesh EBO order).
+    // m_restAreas:   float per face (precomputed from rest positions).
+    std::vector<int>   m_faceIndices;
+    std::vector<float> m_restAreas;
 };

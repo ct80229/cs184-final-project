@@ -97,6 +97,37 @@ __kernel void constraints(
             posOut[iB].pos.xyz -= correction * (wj / totalW);
     }
 
+    /* ── Grab position constraint with neighbourhood soft-pull ──────────────
+     * Hard-pin the grabbed particle at grab_target, then apply a quadratic
+     * falloff displacement to all particles within grab_radius world units.
+     * This turns the sharp single-vertex spike into a smooth rounded pull:
+     *   falloff(d) = (1 - d/R)^2   →  1.0 at centre, 0.0 at radius R
+     * Applied BEFORE sphere projection so the sphere overrides if grab_target
+     * is inside the sphere.
+     */
+    int grab_idx = as_int(params[14]);
+    if (grab_idx >= 0 && grab_idx < numParticles) {
+        float3 grab_tgt = (float3)(params[16], params[17], params[18]);
+        float3 grab_pos = posOut[grab_idx].pos.xyz;  /* pre-pin centre position */
+        float3 delta    = grab_tgt - grab_pos;        /* displacement to propagate */
+
+        /* Hard-pin the grabbed particle exactly at cursor position */
+        posOut[grab_idx].pos.xyz = grab_tgt;
+
+        /* Soft-pull neighbours with quadratic falloff (radius ≈ 6 grid cells) */
+        const float grab_radius = 0.12f;
+        for (int i = 0; i < numParticles; ++i) {
+            if (i == grab_idx) continue;
+            if (posOut[i].pos.w == 0.0f) continue;   /* skip pinned particles */
+            float d = length(posOut[i].pos.xyz - grab_pos);
+            if (d < grab_radius) {
+                float t       = d / grab_radius;
+                float falloff = (1.0f - t) * (1.0f - t);
+                posOut[i].pos.xyz += delta * falloff;
+            }
+        }
+    }
+
     /* ── Post-spring sphere collision projection ─────────────────────────────
      * Spring corrections can drag particles back inside the sphere.
      * Re-project all non-pinned particles outside the sphere after each pass.

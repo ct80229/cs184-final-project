@@ -260,20 +260,65 @@ void ComputePipeline::dispatchConstraints(cl_mem posIn, cl_mem posOut,
 }
 
 // ── dispatchThickness ─────────────────────────────────────────────────────────
-// Sprint 2: stubbed — thickness.cl requires a restAreas buffer not yet allocated.
-// Sprint 3 will wire this up.
-void ComputePipeline::dispatchThickness(cl_mem /*pos*/, cl_mem /*faceIndices*/,
-                                        cl_mem /*thicknessOut*/, int /*numFaces*/)
+// Kernel args (see thickness.cl):
+//   0: particles   (pos CL/GL shared buffer — must be acquired before calling)
+//   1: faceIndices (flat int CL-only buffer, 3 ints per face)
+//   2: restAreas   (float CL-only buffer, one per face)
+//   3: thicknessOut(CL/GL shared thickness buffer — must be acquired)
+//   4: numFaces    (cl_int)
+//
+// One work item per face; global size padded to multiple of workgroup size 64.
+void ComputePipeline::dispatchThickness(cl_mem pos, cl_mem faceIndices,
+                                        cl_mem restAreas, cl_mem thicknessOut,
+                                        int numFaces)
 {
-    // no-op for Sprint 2
+    if (!m_kThickness || numFaces <= 0) return;
+
+    cl_int nf = static_cast<cl_int>(numFaces);
+    CHECK_CL_ERROR(clSetKernelArg(m_kThickness, 0, sizeof(cl_mem), &pos));
+    CHECK_CL_ERROR(clSetKernelArg(m_kThickness, 1, sizeof(cl_mem), &faceIndices));
+    CHECK_CL_ERROR(clSetKernelArg(m_kThickness, 2, sizeof(cl_mem), &restAreas));
+    CHECK_CL_ERROR(clSetKernelArg(m_kThickness, 3, sizeof(cl_mem), &thicknessOut));
+    CHECK_CL_ERROR(clSetKernelArg(m_kThickness, 4, sizeof(cl_int), &nf));
+
+    size_t global = static_cast<size_t>(numFaces);
+    size_t local  = 64;
+    // Pad global to next multiple of local so work items cover all faces.
+    if (global % local != 0) global = ((global / local) + 1) * local;
+
+    cl_int err = clEnqueueNDRangeKernel(m_queue, m_kThickness, 1,
+                                         nullptr, &global, &local,
+                                         0, nullptr, nullptr);
+    CHECK_CL_ERROR(err);
 }
 
 // ── dispatchAdhesion ──────────────────────────────────────────────────────────
-// Sprint 2: stubbed — not needed until surface contact detection is wired up.
-void ComputePipeline::dispatchAdhesion(cl_mem /*pos*/, cl_mem /*vel*/,
-                                       cl_mem /*paramsUBO*/, int /*numParticles*/)
+// Kernel args (see adhesion.cl):
+//   0: particles  (CL/GL shared pos buffer, Particle*: pos+vel, read-write)
+//   1: params     (CL SimParams flat float array, __constant)
+//   2: numParticles (cl_int)
+//
+// One work item per particle; global size padded to multiple of 64.
+// Contact-flag filter (bit 0 of vel.w) runs inside the kernel — work items for
+// non-contact particles return immediately, keeping dispatch cost low.
+void ComputePipeline::dispatchAdhesion(cl_mem particles, cl_mem paramsUBO,
+                                       int numParticles)
 {
-    // no-op for Sprint 2
+    if (!m_kAdhesion || numParticles <= 0) return;
+
+    cl_int np = static_cast<cl_int>(numParticles);
+    CHECK_CL_ERROR(clSetKernelArg(m_kAdhesion, 0, sizeof(cl_mem), &particles));
+    CHECK_CL_ERROR(clSetKernelArg(m_kAdhesion, 1, sizeof(cl_mem), &paramsUBO));
+    CHECK_CL_ERROR(clSetKernelArg(m_kAdhesion, 2, sizeof(cl_int), &np));
+
+    size_t global = static_cast<size_t>(numParticles);
+    size_t local  = 64;
+    if (global % local != 0) global = ((global / local) + 1) * local;
+
+    cl_int err = clEnqueueNDRangeKernel(m_queue, m_kAdhesion, 1,
+                                         nullptr, &global, &local,
+                                         0, nullptr, nullptr);
+    CHECK_CL_ERROR(err);
 }
 
 void ComputePipeline::finish()

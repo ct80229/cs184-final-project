@@ -171,3 +171,80 @@ void Cloth::syncPositionsFromGPU(BufferManager& buffers)
     for (int i = 0; i < N; ++i)
         m_cpuPositions[i] = tmp[i].pos;
 }
+
+void Cloth::buildFaceData()
+{
+    int N = m_gridSize;
+    int numF = numFaces();
+
+    m_faceIndices.clear();
+    m_faceIndices.reserve(numF * 3);
+    m_restAreas.clear();
+    m_restAreas.reserve(numF);
+
+    // Replicate the exact loop from ClothMesh::init() so that:
+    //   face index f in thickness buffer == gl_PrimitiveID f in fragment shader.
+    // Triangle winding (CCW from above):
+    //   tri 0: tl, bl, tr
+    //   tri 1: bl, br, tr
+    for (int r = 0; r < N - 1; ++r) {
+        for (int c = 0; c < N - 1; ++c) {
+            int tl = r * N + c;
+            int bl = (r + 1) * N + c;
+            int tr = r * N + (c + 1);
+            int br = (r + 1) * N + (c + 1);
+
+            // tri 0
+            m_faceIndices.push_back(tl);
+            m_faceIndices.push_back(bl);
+            m_faceIndices.push_back(tr);
+
+            // tri 1
+            m_faceIndices.push_back(bl);
+            m_faceIndices.push_back(br);
+            m_faceIndices.push_back(tr);
+
+            // Compute rest areas from m_restPositions
+            auto restArea = [&](int i0, int i1, int i2) -> float {
+                glm::vec3 p0 = glm::vec3(m_restPositions[i0]);
+                glm::vec3 p1 = glm::vec3(m_restPositions[i1]);
+                glm::vec3 p2 = glm::vec3(m_restPositions[i2]);
+                return 0.5f * glm::length(glm::cross(p1 - p0, p2 - p0));
+            };
+
+            m_restAreas.push_back(restArea(tl, bl, tr));
+            m_restAreas.push_back(restArea(bl, br, tr));
+        }
+    }
+
+    assert(static_cast<int>(m_restAreas.size())    == numF);
+    assert(static_cast<int>(m_faceIndices.size())  == numF * 3);
+    printf("[Cloth] buildFaceData: %d faces\n", numF);
+}
+
+void Cloth::uploadFaceDataToCL(cl_context ctx,
+                                cl_mem& outFaceIndices,
+                                cl_mem& outRestAreas)
+{
+    cl_int err;
+
+    // Face indices: flat int array (no int3 alignment issues), 3 ints per face.
+    // CL_MEM_COPY_HOST_PTR copies on creation — safe to let m_faceIndices live on stack.
+    size_t indicesBytes = m_faceIndices.size() * sizeof(int);
+    outFaceIndices = clCreateBuffer(ctx,
+                                    CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                    indicesBytes, m_faceIndices.data(), &err);
+    if (err != CL_SUCCESS)
+        fprintf(stderr, "[CL] clCreateBuffer faceIndices failed: %d\n", err);
+
+    // Rest areas: one float per face.
+    size_t areasBytes = m_restAreas.size() * sizeof(float);
+    outRestAreas = clCreateBuffer(ctx,
+                                  CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                  areasBytes, m_restAreas.data(), &err);
+    if (err != CL_SUCCESS)
+        fprintf(stderr, "[CL] clCreateBuffer restAreas failed: %d\n", err);
+
+    printf("[Cloth] Uploaded face data to CL: %d faces (%zu + %zu bytes)\n",
+           numFaces(), indicesBytes, areasBytes);
+}

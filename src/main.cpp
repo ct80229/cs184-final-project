@@ -32,10 +32,25 @@
 #include <cstdlib>
 #include <vector>
 
-// ── Global state for keyboard callbacks ──────────────────────────────────────
-static bool g_paused    = false;
-static bool g_wireframe = false;
-static bool g_resetFlag = false;   // set by 'R' key, consumed in render loop
+// ── Global state ─────────────────────────────────────────────────────────────
+// Keyboard state
+static bool g_paused          = false;
+static bool g_wireframe       = false;
+static bool g_resetFlag       = false;   // set by 'R' key, consumed in render loop
+static bool g_debugThickness  = false;   // set by 'T' key, toggles heatmap
+
+// n_film ImGui slider — updated per frame so clothPipeline.setFloat picks it up
+static float g_nFilm          = 1.5f;
+
+// Mouse interaction — pointers set after objects are constructed, before render loop.
+// Callbacks fire from glfwPollEvents() which is always outside acquireForCL.
+static Interaction*    g_interaction = nullptr;
+static SimParams*      g_simParams   = nullptr;
+static Cloth*          g_cloth       = nullptr;
+static BufferManager*  g_buffers     = nullptr;
+// Camera matrices updated each frame so callbacks can unproject with current values.
+static glm::mat4       g_proj{1.0f};
+static glm::mat4       g_view{1.0f};
 
 // ── Debug output callback (GL_ARB_debug_output) ───────────────────────────────
 // glDebugMessageCallback is OpenGL 4.3 core and unavailable on macOS 4.1.
@@ -129,9 +144,63 @@ static void keyCallback(GLFWwindow* window, int key, int /*scancode*/,
         g_resetFlag = true;
         printf("[Input] Reset cloth to rest\n");
         break;
+    case GLFW_KEY_T:
+        g_debugThickness = !g_debugThickness;
+        printf("[Input] Thickness heatmap %s\n", g_debugThickness ? "ON" : "OFF");
+        break;
     default:
         break;
     }
+}
+
+// ── GLFW mouse button callback ────────────────────────────────────────────────
+// Registered BEFORE ImGui_ImplGlfw_InitForOpenGL so ImGui chains to us correctly.
+// Fires from glfwPollEvents() — always outside the CL acquire/release window,
+// so glGetBufferSubData (called by syncPositionsFromGPU) is safe.
+static void mouseButtonCallback(GLFWwindow* window, int button,
+                                int action, int /*mods*/)
+{
+    if (button != GLFW_MOUSE_BUTTON_LEFT) return;
+    if (!g_interaction || !g_simParams || !g_cloth || !g_buffers) return;
+
+    // Always process release — drag must end cleanly even if the cursor moved
+    // over the ImGui overlay before the button was released.
+    if (action == GLFW_RELEASE) {
+        g_interaction->onMouseRelease(*g_simParams);
+        return;
+    }
+
+    // For new grabs (press): suppress if ImGui wants the click.
+    if (ImGui::GetIO().WantCaptureMouse) return;
+
+    if (action == GLFW_PRESS) {
+        // Sync CPU positions while GL owns the buffer (before acquireForCL this frame)
+        g_cloth->syncPositionsFromGPU(*g_buffers);
+
+        double mx, my;
+        glfwGetCursorPos(window, &mx, &my);
+        int winW, winH;
+        glfwGetWindowSize(window, &winW, &winH);
+
+        g_interaction->onMouseDown(mx, my, winW, winH,
+                                   g_proj, g_view,
+                                   g_cloth->cpuPositions(),
+                                   g_cloth->numParticles(),
+                                   g_cloth->gridSize(),
+                                   *g_simParams);
+    }
+}
+
+// ── GLFW cursor position callback ────────────────────────────────────────────
+static void cursorPosCallback(GLFWwindow* window, double x, double y)
+{
+    if (!g_interaction || !g_interaction->isGrabbing()) return;
+    if (!g_simParams) return;
+    // No WantCaptureMouse check: once a drag is active the grab target must
+    // follow the cursor even when it passes over the ImGui overlay.
+    int winW, winH;
+    glfwGetWindowSize(window, &winW, &winH);
+    g_interaction->onMouseMove(x, y, winW, winH, g_proj, g_view, *g_simParams);
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -161,6 +230,10 @@ int main()
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1); // vsync
     glfwSetKeyCallback(window, keyCallback);
+    // Register mouse callbacks BEFORE ImGui init so ImGui chains to them
+    // (install_callbacks=true saves existing callbacks, calls them from its own handler)
+    glfwSetMouseButtonCallback(window, mouseButtonCallback);
+    glfwSetCursorPosCallback(window, cursorPosCallback);
 
     // ── Print OpenGL version and renderer ─────────────────────────────────────
     printf("OpenGL %s — %s\n",
@@ -193,6 +266,9 @@ int main()
     cloth.init();
     cloth.buildSprings();
 
+    // ── Interaction object — must outlive the render loop ─────────────────────
+    Interaction interaction;
+
     // ── 2. Allocate GL buffers (SSBOs must exist before CL interop wraps them) ─
     BufferManager buffers;
     buffers.allocateParticleBuffers(cloth.numParticles());
@@ -214,6 +290,14 @@ int main()
 
     // ── 5. Create CL interop wrappers from the existing GL buffers ───────────
     buffers.createCLBuffers(compute.context());
+
+    // ── 5b. Build and upload per-face data (face indices + rest areas) ────────
+    // These are CL-only buffers (no GL access); never acquired/released with the
+    // GL interop objects.  Computed once from the rest state and reused every frame.
+    cloth.buildFaceData();
+    cl_mem clFaceIndices = nullptr;
+    cl_mem clRestAreas   = nullptr;
+    cloth.uploadFaceDataToCL(compute.context(), clFaceIndices, clRestAreas);
 
     // ── 6. SimParams as a CL buffer (LEARNINGS.md: not a GL UBO for compute) ─
     SimParams simParams = defaultSimParams();
@@ -256,8 +340,30 @@ int main()
     BowlMesh bowl;
     bowl.init();
 
+    // ── Set uniforms that never change ────────────────────────────────────────
+    // Sampler uniforms (texture unit indices, not GL object IDs):
+    //   uPosTBO      = 0: particle TBO (GL_TEXTURE0)
+    //   uThicknessTBO= 1: per-face thickness TBO (GL_TEXTURE1)
+    // Grid and film uniforms (constant for now; ImGui sliders are Sprint 4):
+    //   uGridSize    = 64
+    //   uNFilm       = 1.5 (dry saran wrap refractive index)
+    clothPipeline.bind();
+    clothPipeline.setInt  ("uPosTBO",       0);
+    clothPipeline.setInt  ("uThicknessTBO", 1);
+    clothPipeline.setInt  ("uGridSize",     cloth.gridSize());
+    // uNFilm is set per-frame so the ImGui n_film slider takes effect immediately
+    clothPipeline.unbind();
+
     printf("Sprint 3 init complete: cloth and bowl rendering pipelines ready\n");
     fflush(stdout);
+
+    // ── Wire up global pointers for mouse callbacks ───────────────────────────
+    // Callbacks fire from glfwPollEvents() which is always outside acquireForCL,
+    // so these pointers are safe to dereference there.
+    g_interaction = &interaction;
+    g_simParams   = &simParams;
+    g_cloth       = &cloth;
+    g_buffers     = &buffers;
 
     // ── Render loop ───────────────────────────────────────────────────────────
     while (!glfwWindowShouldClose(window)) {
@@ -305,6 +411,19 @@ int main()
                 buffers.swapPingPong();
             }
 
+            // ── Thickness: per-face area ratio → thickness_nm ────────────
+            // Reads posA (constraint-solved positions), writes to thicknessBuffer.
+            // clFaceIndices/clRestAreas are CL-only — not in acquire/release pair.
+            compute.dispatchThickness(
+                buffers.clPosA(), clFaceIndices, clRestAreas,
+                buffers.clThickness(), cloth.numFaces());
+
+            // ── Adhesion: Park & Byun §3.2 cohesion springs ───────────────
+            // Reads pos.xyz from neighbours; writes vel.xyz only for contact particles.
+            // Each work item writes only to its own index — no write races.
+            compute.dispatchAdhesion(buffers.clPosA(), clParams,
+                                     cloth.numParticles());
+
             // ── Transfer buffer ownership back: CL → GL ───────────────────
             buffers.releaseFromCL(compute.queue());
 
@@ -315,13 +434,14 @@ int main()
             // ping-pong swaps the GL buffer ID behind posBufferA() each frame;
             // the TBO must be re-pointed at the new ID before drawing.
             clothMesh.rebindTBO(buffers.posBufferA());
+
         }
 
         // ── Clear frame ────────────────────────────────────────────────────
         int fbW, fbH;
         glfwGetFramebufferSize(window, &fbW, &fbH);
         glViewport(0, 0, fbW, fbH);
-        glClearColor(0.08f, 0.08f, 0.10f, 1.0f);
+        glClearColor(0.82f, 0.84f, 0.86f, 1.0f);  // light grey — wrap reads as tint against bright bg
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         CHECK_GL_ERROR();
 
@@ -329,12 +449,17 @@ int main()
         // Static camera for the milestone; mouse orbit is Sprint 4.
         float aspect = (fbH > 0) ? static_cast<float>(fbW) / static_cast<float>(fbH)
                                   : 1.0f;
+        glm::vec3 cameraEye(0.0f, 1.5f, 2.5f);  // extracted for uCameraPos uniform
         glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, 0.01f, 100.0f);
         glm::mat4 view = glm::lookAt(
-            glm::vec3(0.0f,  1.5f, 2.5f),   // eye: above and in front of cloth
+            cameraEye,
             glm::vec3(0.0f, -0.3f, 0.0f),   // target: slightly below cloth centre
             glm::vec3(0.0f,  1.0f, 0.0f));  // up
         glm::mat4 mvp  = proj * view;        // model = identity for cloth
+
+        // Keep globals in sync so mouse callbacks can unproject with current matrices
+        g_proj = proj;
+        g_view = view;
 
         glEnable(GL_DEPTH_TEST);
 
@@ -347,14 +472,22 @@ int main()
         glDisable(GL_CULL_FACE);
         CHECK_GL_ERROR();
 
-        // ── Draw cloth (solid white / wireframe via glPolygonMode) ────────
-        // Wireframe is handled by glPolygonMode (set by W key) with GL_TRIANGLES —
-        // this draws all 3 edges per triangle for a proper grid overlay.
+        // ── Draw cloth ────────────────────────────────────────────────────
+        // Alpha blending: cloth is semi-transparent (alpha 0.75–0.92).
+        // Bowl is drawn first and depth-tested correctly; blending shows it through.
+        // Wireframe: glPolygonMode (W key) + GL_TRIANGLES draws all 3 edges.
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
         clothPipeline.bind();
-        clothPipeline.setMat4("uMVP",    mvp);
-        clothPipeline.setInt ("uPosTBO", 0);   // TBO on texture unit 0
+        clothPipeline.setMat4 ("uMVP",            mvp);
+        clothPipeline.setVec3 ("uCameraPos",      cameraEye);
+        clothPipeline.setInt  ("uDebugThickness", g_debugThickness ? 1 : 0);
+        clothPipeline.setFloat("uNFilm",          g_nFilm);
         clothMesh.draw(GL_TRIANGLES);
         clothPipeline.unbind();
+
+        glDisable(GL_BLEND);
         CHECK_GL_ERROR();
 
         // ── ImGui frame ────────────────────────────────────────────────────
@@ -362,21 +495,31 @@ int main()
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        // Sprint 2 debug overlay: pause state and error info
+        // ── ImGui overlay ──────────────────────────────────────────────────
         ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
-        ImGui::SetNextWindowSize(ImVec2(320, 120), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(340, 225), ImGuiCond_Always);
         ImGui::Begin("Sim", nullptr,
             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoCollapse);
+
         ImGui::Text("Cloth: %dx%d  Springs: %d",
                     cloth.gridSize(), cloth.gridSize(), cloth.numSprings());
-        ImGui::Text("Substeps: %d  Stiffness: %.0f",
-                    simParams.substeps, simParams.stiffness);
-        ImGui::Text("Status: %s  (P=pause W=wire R=reset)",
+        ImGui::Text("Status: %s  (P=pause W=wire R=reset T=heatmap)",
                     g_paused ? "PAUSED" : "running");
-        ImGui::Text("Sphere: (%.1f,%.1f,%.1f) r=%.2f",
-                    simParams.sphere.x, simParams.sphere.y,
-                    simParams.sphere.z, simParams.sphere.w);
+        ImGui::Text("Grab: %s",
+                    g_interaction && g_interaction->isGrabbing() ? "ACTIVE" : "none");
+        ImGui::Separator();
+
+        // Stiffness: low values (~5) let cloth stretch far enough to produce
+        // visible iridescence (requires ~15x area strain → thickness < 800nm).
+        if (ImGui::SliderFloat("Stiffness", &simParams.stiffness, 5.0f, 200.0f, "%.0f")) {
+            simParams.adhesion_k = 0.1f * simParams.stiffness;
+        }
+        ImGui::SliderFloat("Damping",   &simParams.damping,   0.95f, 0.999f, "%.3f");
+        ImGui::SliderInt  ("Substeps",  &simParams.substeps,  4,     32);
+        // n_film: 1.5 = dry saran wrap; 1.33 = wet — shifts iridescence hue bands
+        ImGui::SliderFloat("n_film",    &g_nFilm,             1.33f, 1.6f,   "%.2f");
+
         ImGui::End();
 
         ImGui::Render();
@@ -386,6 +529,8 @@ int main()
     }
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
+    clReleaseMemObject(clFaceIndices);
+    clReleaseMemObject(clRestAreas);
     clReleaseMemObject(clParams);
 
     ImGui_ImplOpenGL3_Shutdown();

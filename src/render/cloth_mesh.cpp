@@ -8,12 +8,13 @@ ClothMesh::ClothMesh() = default;
 
 ClothMesh::~ClothMesh()
 {
-    if (m_tbo) { glDeleteTextures(1, &m_tbo); m_tbo = 0; }
-    if (m_ebo) { glDeleteBuffers(1, &m_ebo);  m_ebo = 0; }
-    if (m_vao) { glDeleteVertexArrays(1, &m_vao); m_vao = 0; }
+    if (m_thicknessTBO) { glDeleteTextures(1, &m_thicknessTBO); m_thicknessTBO = 0; }
+    if (m_tbo)          { glDeleteTextures(1, &m_tbo);          m_tbo          = 0; }
+    if (m_ebo)          { glDeleteBuffers(1, &m_ebo);           m_ebo          = 0; }
+    if (m_vao)          { glDeleteVertexArrays(1, &m_vao);      m_vao          = 0; }
 }
 
-void ClothMesh::init(int gridSize, GLuint posBuffer, GLuint /*thicknessBuffer*/)
+void ClothMesh::init(int gridSize, GLuint posBuffer, GLuint thicknessBuffer)
 {
     int N = gridSize;
 
@@ -65,6 +66,21 @@ void ClothMesh::init(int gridSize, GLuint posBuffer, GLuint /*thicknessBuffer*/)
     glBindTexture(GL_TEXTURE_BUFFER, 0);
     CHECK_GL_ERROR();
 
+    // ── 4. Texture Buffer Object for per-face thickness ───────────────────────
+    // thicknessBuffer is a GL_ARRAY_BUFFER of numFaces floats written by the
+    // OpenCL thickness kernel each frame.  GL_R32F exposes it as a 1-component
+    // float texel array; gl_PrimitiveID in the fragment shader indexes directly
+    // into it without any per-vertex attribute machinery.
+    // The thickness buffer ID never changes (no ping-pong), so this TBO is set up
+    // once and never rebound.
+    if (thicknessBuffer) {
+        glGenTextures(1, &m_thicknessTBO);
+        glBindTexture(GL_TEXTURE_BUFFER, m_thicknessTBO);
+        glTexBuffer(GL_TEXTURE_BUFFER, GL_R32F, thicknessBuffer);
+        glBindTexture(GL_TEXTURE_BUFFER, 0);
+        CHECK_GL_ERROR();
+    }
+
     printf("[ClothMesh] init: %d quads, %d indices, TBO wrapping buffer %u\n",
            (N - 1) * (N - 1), m_indexCount, posBuffer);
 }
@@ -81,9 +97,15 @@ void ClothMesh::rebindTBO(GLuint posBuffer)
 
 void ClothMesh::draw(GLenum primitiveMode)
 {
-    // TBO must already be up-to-date (caller calls rebindTBO each frame).
+    // Unit 0: particle positions TBO — must be rebound each frame (ping-pong).
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_BUFFER, m_tbo);
+
+    // Unit 1: per-face thickness TBO — static binding (thickness buffer never ping-pongs).
+    if (m_thicknessTBO) {
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_BUFFER, m_thicknessTBO);
+    }
 
     glBindVertexArray(m_vao);
     glDrawElements(primitiveMode, m_indexCount, GL_UNSIGNED_INT, nullptr);

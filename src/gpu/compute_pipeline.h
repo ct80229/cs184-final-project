@@ -40,15 +40,19 @@ public:
                              cl_mem paramsUBO, int numSprings, bool reverseOrder);
 
     // Dispatches thickness.cl — per-face area ratio → thickness_nm.
-    // Stub until Sprint 3 wires up restAreas buffer.
-    void dispatchThickness(cl_mem pos, cl_mem faceIndices, cl_mem thicknessOut,
-                           int numFaces);
+    // pos:          current particle buffer (CL/GL shared, already acquired)
+    // faceIndices:  flat int CL-only buffer, 3 ints per face
+    // restAreas:    float CL-only buffer, one per face
+    // thicknessOut: per-face float output (CL/GL shared, already acquired)
+    // numFaces:     total triangle count (= 2*(N-1)*(N-1) for an N×N grid)
+    void dispatchThickness(cl_mem pos, cl_mem faceIndices, cl_mem restAreas,
+                           cl_mem thicknessOut, int numFaces);
 
     // Dispatches adhesion.cl — Park & Byun §3.2 cohesion spring forces.
     // Only processes particles flagged as surface-contact (vel.w bit 0).
-    // Stub until Sprint 3 surface contact detection is wired up.
-    void dispatchAdhesion(cl_mem pos, cl_mem vel,
-                          cl_mem paramsUBO, int numParticles);
+    // particles: CL/GL shared pos buffer (contains pos+vel Particle structs, read-write)
+    // paramsUBO: CL SimParams buffer (adhesion_k and adhesion_radius at float indices 12/13)
+    void dispatchAdhesion(cl_mem particles, cl_mem paramsUBO, int numParticles);
 
     // Blocks until all queued CL commands have completed (clFinish).
     // Must be called before any glDrawElements each frame.

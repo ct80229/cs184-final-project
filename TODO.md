@@ -1,172 +1,105 @@
 # TODO.md — Virtual Saran Wrap
 
 **Final deadline:** 2026-05-04
-**Milestone deadline:** 2026-04-20 (Gradescope: [Final Project] Milestone)
 **Demo target:** 60 fps at 64×64, 2020 MacBook Pro (integrated GPU)
 
 ---
 
-## Milestone Deliverables (Due 2026-04-20 @ 11:59 PM)
-
-Submitted as a PDF to Gradescope with clickable links to all three items below.
-
-- [ ] **Milestone webpage** — ~1 page: project name, accomplishments, preliminary results, updated work plan
-- [ ] **1-minute video** — slides + narration or screen recording; all group members appear/speak; upload as unlisted YouTube or Google Drive (visible to all Berkeley users); link on webpage
-- [ ] **2–3 slide deck** — project summary and current progress; link on webpage
-- [ ] Submit PDF to Gradescope "[Final Project] Milestone" — use Safari Print → Save as PDF for correct sizing
-
-*Staff feedback due back by 2026-04-24.*
-
----
-
-## Sprint 1 (Week of 2026-04-14) — Foundation & Platform
-
-### Platform Strategy: OpenCL + OpenGL 4.1 — [priority: high]
-**Decision (2026-04-14):** Use OpenCL for compute passes + OpenGL 4.1 for rendering.
-Buffer sharing via `cl_mem` / `CGLGetCurrentContext`. Supported on Intel + Apple Silicon (Rosetta).
-- [x] Verify OpenCL availability on dev machine (`probeOpenCL()` in main.cpp) — 2026-04-15
-- [x] Add OpenCL framework to CMakeLists (`-framework OpenCL`) — 2026-04-15
-- [x] Replace SSBO compute dispatches with OpenCL kernels; keep OpenGL for VAO/draw pipeline — 2026-04-15
-- [x] Establish CL/GL interop: `clCreateFromGLBuffer` for shared particle buffers — 2026-04-15
-- [x] Document CL kernel file naming convention in CLAUDE.md (`src/shaders/*.cl`) — 2026-04-15
-
-### CMake & Project Skeleton — [priority: high]
-- [x] Write `CMakeLists.txt` — GLFW 3.4, GLM 1.0.1, ImGui v1.91.5 via FetchContent, `-framework OpenCL`
-- [x] All source file stubs created under `src/` (gpu/, sim/, render/, shaders/)
-- [x] Confirm `cmake -B build && cmake --build build` produces a runnable binary
-- [x] GLFW window opens, OpenGL 4.1 core profile context, render loop running — completed 2026-04-15
-
-### GPU Context Verification — [priority: high]
-- [x] Print OpenGL version and renderer string at startup — completed 2026-04-15
-- [x] Implement `CHECK_GL_ERROR()` macro in `src/gpu/gl_check.h` — completed 2026-04-15
-- [x] OpenCL GPU probe at startup (`probeOpenCL()` in `main.cpp`) — completed 2026-04-15
-- [x] GL ARB debug callback (`GL_ARB_debug_output`) for debug builds — completed 2026-04-15
-- [ ] ImGui panels wired up (deferred to Sprint 4)
-
----
-
-## Sprint 2 (2026-04-15 – 2026-04-19) — Cloth Mesh & Physics Core ✅ COMPLETE 2026-04-15
-
-### Cloth Mesh & Particle Buffer — [priority: high]
-- [x] `sim/cloth.cpp` — 64×64 particle grid, structural/shear/bend springs (23938 total) — 2026-04-15
-- [x] Particle layout: `{ vec4 pos (w=mass_inv); vec4 vel (w=flags) }` = 32 bytes — 2026-04-15
-- [x] `gpu/buffer_manager.cpp` — GL_ARRAY_BUFFER ping-pong (posA/B), springs, thickness — 2026-04-15
-      NOTE: GL_SHADER_STORAGE_BUFFER is 4.3+ only; GL_ARRAY_BUFFER used for CL interop.
-- [x] `SimParams` as a CL buffer via `clCreateBuffer` (not a GL UBO for CL compute) — 2026-04-15
-- [x] Corner pinning REMOVED — all particles mass_inv=1.0f — 2026-04-15
-      NOTE: pinned corners caused a tent shape (edges anchored, centre fell). Saran wrap
-      has no anchor points; drape is achieved purely by gravity + sphere collision.
-
-### Integration Compute Kernel — [priority: high]
-- [x] `shaders/integrate.cl` — semi-implicit Verlet, damping, gravity — 2026-04-15
-- [x] Sphere SDF collision inline — 2026-04-15
-- [x] NaN guard + atomic error counter — 2026-04-15
-- [x] `gpu/compute_pipeline.cpp` — CGL/CL sharegroup context, kernel load, dispatch — 2026-04-15
-- [x] Verify visually: cloth falls and drapes on sphere — confirmed 2026-04-15
-
-### Constraint Solver — [priority: high]
-- [x] `shaders/constraints.cl` — serial Gauss-Seidel PBD, global_size=1 — 2026-04-15
-- [x] Forward + reverse pass per substep (reverseOrder flag) — 2026-04-15
-- [x] Skip pinned particles (`pos.w == 0.0`) — still in code but no particles are currently pinned — 2026-04-15
-- [x] Dispatch loop wired in main.cpp render loop — 2026-04-15
-- [x] Verify visually: cloth drapes correctly without oscillation — confirmed 2026-04-15 (no pinned corners; drape verified)
-- [ ] Sprint 4: parallelise via checkerboard graph colouring for 60 fps at 64×64
-
----
-
-## Sprint 3 — Rendering & Iridescence (minimal rendering COMPLETE 2026-04-15)
-
-### Bowl Mesh ✅
-- [x] `render/bowl_mesh.cpp` — procedural full sphere (theta 0→π), back-face culled during draw — 2026-04-15
-      NOTE: corrected from upper hemisphere to full sphere after visual review.
-- [x] `shaders/bowl.vert` + `shaders/bowl.frag` — created — 2026-04-15
-- [x] Distinct visually (grey-blue Phong vs white cloth) — 2026-04-15
-
-### Cloth Rendering Pipeline ✅
-- [x] `render/cloth_mesh.cpp` — VAO+EBO, TBO for particle positions — 2026-04-15
-- [x] `shaders/cloth.vert` — TBO fetch via texelFetch(uPosTBO, gl_VertexID*2) — 2026-04-15
-- [x] `render_pipeline.cpp` — loadShaders, bind/unbind, all uniform setters — 2026-04-15
-- [x] TBO rebind each frame (ClothMesh::rebindTBO) — handles ping-pong ID alternation — 2026-04-15
-- [x] Wireframe via glPolygonMode(GL_LINE) + GL_TRIANGLES (W key) — 2026-04-15
-
-### Thickness Compute Shader — [priority: high, Sprint 3 remaining]
-- [ ] `shaders/thickness.cl` — per-face area ratio → `thickness_nm`; wire restAreas buffer
-- [ ] `thickness_nm = 12000.0 / strain`, clamped 150–800 nm range
-- [ ] **Verify T key heatmap shows values in visible interference range before connecting iridescence**
-
-### Iridescence Fragment Shader — [priority: high, Sprint 3 remaining]
-- [ ] `shaders/cloth.frag` — Wyman et al. (2013) CIE approximation (preferred over Zucconi — better violet/red rolloff; see docs/research/thin_film_iridescence.md)
-- [ ] `wavelength_to_rgb()` via xFit/yFit/zFit Gaussians + XYZ→sRGB
-- [ ] `thin_film_color()` — 20-sample spectrum integration, 380–780 nm
-- [ ] View-dependent OPD: `2.0 * n * d * cos(theta_t)` (Snell's law for theta_t)
-- [ ] Base material: near-transparent (alpha 0.75–0.92), blue-green tint
-- [ ] Final mix: `mix(base, iridescence, 0.4 + 0.4*stretch_mix + 0.2*fresnel)`
-
-### Adhesion Compute Shader — [priority: medium, Sprint 3 remaining]
-- [ ] `shaders/adhesion.cl` — Park & Byun §3.2 cohesion springs (wire up dispatch)
-- [ ] Only runs on contact-flagged particles
-- [ ] Neighbor search within `adhesion_radius`
-
----
-
-## Sprint 4 (2026-04-28 – 2026-05-04) — Interaction, Polish & Demo
+## Current Sprint (Week of 2026-04-20) — Interaction, Polish & Demo
 
 ### Mouse Interaction — [priority: high]
-- [ ] `sim/interaction.cpp/.h` — ray unproject, Möller–Trumbore triangle hit
-- [ ] CPU-side position mirror via `glGetBufferSubData` (once per grab start)
-- [ ] Drag: re-unproject at depth plane, update `grab_target` via `glBufferSubData`
-- [ ] Release: set `grab_particle = -1`
-- [ ] Verify: drag stretches cloth, releases correctly
+- [x] `sim/interaction.cpp` — ray unproject via `glm::inverse(proj * view)` — 2026-04-21
+- [x] Möller–Trumbore triangle hit against CPU-side position mirror — 2026-04-21
+- [x] CPU mirror: `glGetBufferSubData` into `std::vector<glm::vec4>` once per grab start — 2026-04-21
+- [x] Mouse move: re-unproject to depth plane, write `grab_target` via `clEnqueueWriteBuffer` — 2026-04-21
+- [x] Mouse release: `grab_particle = -1` — 2026-04-21
+- [ ] Verify: drag stretches cloth and produces visible iridescence shift — [priority: high]
 
-### Debug Modes & ImGui — [priority: medium]
-- [x] `W` — wireframe overlay (glPolygonMode + GL_TRIANGLES) — 2026-04-15
-- [ ] `T` — thickness heatmap (requires thickness.cl to be implemented first)
-- [ ] `N` — surface normals as line segments
-- [x] `R` — reset cloth to rest state — 2026-04-15
+### ImGui Sliders — [priority: medium]
+- [x] Stiffness slider (range 5–200, default 100) — drives stretch/iridescence visibility — 2026-04-21
+- [x] Damping slider (0.95–0.999, default 0.98) — 2026-04-21
+- [x] Substeps slider (4–32, default 16) — 2026-04-21
+- [x] `n_film` slider (1.33–1.6, default 1.5) — wet/dry refractive index — 2026-04-21
+- [ ] Adhesion_k slider (0.0–20.0) — [priority: low]
+
+### Debug Modes — [priority: medium]
+- [x] `W` — wireframe overlay — 2026-04-15
+- [x] `T` — thickness heatmap (blue=150 nm, red=12000 nm) — 2026-04-15
+- [x] `R` — reset cloth to rest — 2026-04-15
 - [x] `P` — pause/resume — 2026-04-15
-- [ ] ImGui sliders: stiffness, bend_stiffness, damping, substeps, n_dry/n_wet, adhesion_k
+- [ ] `N` — surface normals as line segments — [priority: low]
 
 ### Performance Profiling — [priority: medium]
-- [ ] `glfwGetTime()` frame delta display in ImGui
-- [ ] `GL_TIME_ELAPSED` queries per compute dispatch
-- [ ] Hit 60 fps at 64×64 on integrated GPU — tune substeps if needed
-- [ ] Test 128×128 — target ≥ 30 fps
+- [ ] `glfwGetTime()` frame delta → FPS counter in ImGui — [priority: medium]
+- [ ] `GL_TIME_ELAPSED` query around CL dispatch block (one query wrapping the full compute pass) — [priority: medium]
+- [ ] Verify 60 fps at 64×64 on integrated GPU — tune substeps if needed — [priority: high]
+- [ ] Test 128×128 — target ≥ 30 fps — [priority: medium]
 
 ### Final Demo Prep — [priority: high]
-- [ ] Visual comparison against `assets/reference/` real saran wrap images
-- [ ] Record demo video (screen capture, 60 fps)
-- [ ] Writeup: physics constants table, GPU timing results
+- [ ] Visual comparison: render side-by-side with `assets/reference/` real saran wrap images — [priority: high]
+- [ ] Record demo video (screen capture, 60 fps, 2–3 minutes) — [priority: high]
+- [ ] Writeup: physics constants table, GPU timing results, iridescence model reference — [priority: high]
 
 ---
 
-## Backlog
-
-- [ ] Self-collision (descoped — see CLAUDE.md: proximity repulsion only)
-- [ ] Spectral CIE rendering (descoped — Zucconi Gaussian is sufficient)
-- [ ] Blender mesh import (descoped — procedural bowl only)
+## Next Sprint — none; all remaining work is in the current sprint above
 
 ---
 
-## Debt
+## Backlog (descoped — do not implement)
 
-- [ ] `bowl_mesh.cpp`: generates a full sphere (theta 0→π) then relies on back-face culling
-      to hide the lower hemisphere. Could generate only the upper hemisphere (theta 0→π/2)
-      to halve the vertex/index count. Low priority — geometry is tiny vs. particle buffers.
-- [ ] `interaction.cpp`: all three methods are stubs with `(void)` suppression. Sprint 4 work.
-- [ ] `dispatchThickness` / `dispatchAdhesion` in `compute_pipeline.cpp`: are no-ops.
-      Wire up once `restAreas` buffer and surface-contact detection are implemented (Sprint 3).
-- [ ] Cloth corners not pinned (`mass_inv = 1.0` for all). Decide before final demo whether
-      to pin corners for a cleaner drape or keep free-fall for interactive grabbing.
-- [ ] `buffer_manager.cpp::allocateParamsUBO()`: allocates a GL_UNIFORM_BUFFER and binds it
-      to binding 3, but no vertex/fragment shader reads it. The CL pipeline uses a separate
-      `clCreateBuffer` path. Consider removing the GL UBO allocation once SimParams access
-      from GLSL shaders is needed (iridescence shader will need sphere/thickness, not SimParams).
-- [ ] `bowl_mesh.cpp`: duplicates shader compilation helpers (`readShaderFile`, `compileStage`,
-      `linkProgram`) that are also in `RenderPipeline`. If bowl grows in complexity, consider
-      routing through `RenderPipeline` to remove the duplication. Low priority while bowl shader is static.
+- Self-collision — replaced with proximity repulsion; BVH not worth 5–7 days
+- Spectral CIE rendering — Wyman Gaussian (20 samples) is sufficient
+- Blender mesh import — procedural bowl only
+- Parallelise constraints via checkerboard graph colouring — serial Gauss-Seidel is
+  correct and fast enough for 64×64 at current substeps; defer to post-deadline
+
+---
+
+## Debt (known issues, non-blocking)
+
+- `bowl_mesh.cpp` generates a full sphere (theta 0→π) and relies on back-face culling.
+  Generating only the upper hemisphere (theta 0→π/2) would halve vertex count — but
+  geometry is negligible vs. particle buffers. Low priority.
+- `bowl_mesh.cpp` duplicates `readShaderFile`/`compileStage`/`linkProgram` helpers
+  that live in `RenderPipeline`. Fine while bowl shader is static.
+- `buffer_manager.cpp::allocateParamsUBO()` allocates a GL_UNIFORM_BUFFER at binding 3
+  that no shader reads — SimParams goes through CL. Remove if it causes confusion.
 
 ---
 
 ## Completed
 
-<!-- - [x] Task name — completed YYYY-MM-DD -->
+### Milestone
+- [x] Milestone webpage — 2026-04-20
+- [x] 1-minute milestone video — 2026-04-20
+- [x] 2–3 slide deck — 2026-04-20
+- [x] Gradescope submission — 2026-04-20
+
+### Sprint 1 — Foundation & Platform (complete 2026-04-15)
+- [x] GLFW 4.1 core profile window, render loop, ImGui init
+- [x] OpenCL GPU probe (`probeOpenCL()`), `-framework OpenCL` in CMakeLists
+- [x] CL/GL interop established (`clCreateFromGLBuffer`)
+- [x] `CHECK_GL_ERROR()` + `GL_ARB_debug_output` debug callback
+- [x] `.cl` kernel file convention documented in CLAUDE.md
+
+### Sprint 2 — Cloth Mesh & Physics Core (complete 2026-04-15)
+- [x] 64×64 particle grid, 23938 springs (structural/shear/bend)
+- [x] `integrate.cl` — Verlet, gravity, damping, sphere SDF collision, NaN guard
+- [x] `constraints.cl` — serial Gauss-Seidel PBD, forward+reverse pass per substep
+- [x] `BufferManager` — GL_ARRAY_BUFFER ping-pong, CL interop, `swapPingPong`
+- [x] `ComputePipeline` — CGL/CL sharegroup context, kernel load, all dispatches
+- [x] Physics corrections: corner pinning removed, cloth resized to [-0.6,0.6],
+      tangential friction 0.55, sphere projection epsilon 0.001, stiffness→100, substeps→16
+
+### Sprint 3 — Rendering & Iridescence (complete 2026-04-21)
+- [x] `bowl_mesh.cpp` — procedural full sphere, grey-blue Phong, back-face culled
+- [x] `cloth_mesh.cpp` — VAO+EBO, position TBO (GL_RGBA32F), thickness TBO (GL_R32F)
+- [x] `cloth.vert` — `texelFetch(uPosTBO, gl_VertexID*2)`, TBO-neighbor normals, viewDir
+- [x] `render_pipeline.cpp` — shader load, bind/unbind, all uniform setters
+- [x] `thickness.cl` — per-face area ratio → thickness_nm (strain clamp 0.1–80)
+- [x] `cloth.frag` — Wyman CIE (2013) thin-film iridescence, 20-sample spectrum,
+      half-wave phase shift, Fresnel blend, T-key heatmap mode (`uDebugThickness`)
+- [x] `adhesion.cl` — Park & Byun §3.2 cohesion springs, contact-flagged particles only
+- [x] Alpha blending enabled; camera at (0, 1.5, 2.5) → (0, -0.3, 0)
+- [x] W / T / P / R keys all working

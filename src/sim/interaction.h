@@ -6,14 +6,18 @@
 // (1-frame latency is acceptable). Möller–Trumbore ray-triangle intersection
 // finds the nearest hit particle.
 //
-// On drag: only grab_target is updated each move event via glBufferSubData —
-// no further GPU readback during the drag.
+// On drag: grab_target is updated in the SimParams struct each cursor-move
+// event. The render loop's clEnqueueWriteBuffer picks it up next frame —
+// no additional glBufferSubData calls are needed.
 //
 // On release: grab_particle is reset to -1.
+//
+// IMPORTANT: All three methods mutate SimParams& directly.
+// Do NOT call glBufferSubData on paramsUBO — no shader reads it.
+// The CL render loop uploads simParams every frame via clEnqueueWriteBuffer.
 
 #include <glm/glm.hpp>
 #include <vector>
-#include <OpenGL/gl3.h>
 #include "sim/params.h"
 
 class Interaction {
@@ -21,31 +25,32 @@ public:
     Interaction();
     ~Interaction();
 
-    // TODO: Unproject a ray from (screenX, screenY), test against cloth triangles
-    //       using Möller–Trumbore, find the nearest hit particle index.
-    //       Sets SimParams::grab_particle and uploads the updated UBO.
-    //       cpuPositions: CPU mirror populated by Cloth::syncPositionsFromGPU().
-    void onMouseDown(double screenX, double screenY,
-                     int viewportW,  int viewportH,
+    // Unproject a ray from (screenX, screenY) in window coordinates (screen points),
+    // test against cloth triangles using Möller–Trumbore, set grab_particle to the
+    // vertex of the nearest hit triangle closest to the hit position.
+    // cpuPositions: CPU mirror populated by Cloth::syncPositionsFromGPU() immediately
+    // before this call.
+    void onMouseDown(double screenX,  double screenY,
+                     int windowW,     int windowH,
                      const glm::mat4& proj, const glm::mat4& view,
                      const std::vector<glm::vec4>& cpuPositions,
                      int numParticles, int gridSize,
-                     GLuint paramsUBO, SimParams& params);
+                     SimParams& params);
 
-    // TODO: Re-unproject mouse position to a depth plane at m_grabDepth.
-    //       Update SimParams::grab_target and upload via glBufferSubData.
-    void onMouseMove(double screenX, double screenY,
-                     int viewportW,  int viewportH,
+    // Re-unproject cursor to a constant-depth plane (depth = grabbed particle's NDC z).
+    // Writes the world-space intersection to params.grab_target.
+    void onMouseMove(double screenX,  double screenY,
+                     int windowW,     int windowH,
                      const glm::mat4& proj, const glm::mat4& view,
-                     GLuint paramsUBO, SimParams& params);
+                     SimParams& params);
 
-    // TODO: Set grab_particle = -1; upload updated params to paramsUBO.
-    void onMouseRelease(GLuint paramsUBO, SimParams& params);
+    // Set grab_particle = -1 and clear grab state.
+    void onMouseRelease(SimParams& params);
 
     bool isGrabbing() const { return m_grabbing; }
 
 private:
     bool      m_grabbing  = false;
-    float     m_grabDepth = 0.0f;   // NDC depth of grabbed particle (used for drag plane)
+    float     m_grabDepth = 0.0f;   // NDC z of grabbed particle (used for drag plane)
     glm::vec3 m_grabWorld{};        // world-space position at grab start
 };

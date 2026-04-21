@@ -27,11 +27,13 @@ public:
     // (The GL buffer ID behind posBufferA() alternates every frame.)
     void rebindTBO(GLuint posBuffer);
 
-    int indexCount() const { return m_indexCount; }
+    int    indexCount()    const { return m_indexCount;    }
+    GLuint thicknessTBO()  const { return m_thicknessTBO;  }
 
 private:
-    GLuint m_vao        = 0;
-    GLuint m_ebo        = 0;   // element (index) buffer object
-    GLuint m_tbo        = 0;   // texture buffer object — particle positions (GL_RGBA32F)
-    int    m_indexCount = 0;
+    GLuint m_vao          = 0;
+    GLuint m_ebo          = 0;   // element (index) buffer object
+    GLuint m_tbo          = 0;   // TBO for particle positions  (GL_RGBA32F, unit 0)
+    GLuint m_thicknessTBO = 0;   // TBO for per-face thickness  (GL_R32F,    unit 1)
+    int    m_indexCount   = 0;
 };
