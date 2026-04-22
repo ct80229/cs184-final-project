@@ -365,8 +365,27 @@ int main()
     g_cloth       = &cloth;
     g_buffers     = &buffers;
 
+    // ── Performance counters ───────────────────────────────────────────────────
+    // GL_TIME_ELAPSED (GL 3.3 / ARB_timer_query) wraps the compute block.
+    // It measures GL GPU time only — CL dispatches are not GL commands and return
+    // ~0 ns. We drain the result each frame to avoid pipeline stalls but display
+    // wall-clock ms from glfwGetTime() instead, which accurately captures the CL
+    // stall that clFinish() imposes on the CPU.
+    GLuint timeQuery = 0;
+    glGenQueries(1, &timeQuery);
+    double lastFrameTime = glfwGetTime();
+    float  smoothedFps   = 60.0f;
+    float  computeMs     = 0.0f;
+
     // ── Render loop ───────────────────────────────────────────────────────────
     while (!glfwWindowShouldClose(window)) {
+        // ── FPS: exponential moving average (α=0.1) over ~10 frames ──────
+        double now = glfwGetTime();
+        double dt  = now - lastFrameTime;
+        lastFrameTime = now;
+        if (dt > 0.0)
+            smoothedFps = smoothedFps * 0.9f + static_cast<float>(1.0 / dt) * 0.1f;
+
         glfwPollEvents();
 
         // ── Handle cloth reset ('R' key) ───────────────────────────────────
@@ -377,33 +396,32 @@ int main()
         }
 
         if (!g_paused) {
-            // ── Push updated SimParams to CL ──────────────────────────────
+            // Upload updated SimParams (stiffness, substeps, grab_target, etc.)
             CHECK_CL_ERROR(clEnqueueWriteBuffer(
                 compute.queue(), clParams, CL_FALSE, 0,
                 sizeof(SimParams), &simParams, 0, nullptr, nullptr));
 
+            // ── Begin timing: GL query + wall-clock ───────────────────────
+            glBeginQuery(GL_TIME_ELAPSED, timeQuery);
+            double computeStart = glfwGetTime();
+
             // ── Transfer buffer ownership: GL → CL ────────────────────────
             buffers.acquireForCL(compute.queue());
 
-            // ── Integrate: posA → posB, then swap so posA = result ────────
-            // The `m_errorCount` buffer in ComputePipeline is passed via the
-            // `vel` parameter (velocities are inline; vel repurposed as error counter).
+            // ── Integrate + constraints ───────────────────────────────────
             compute.dispatchIntegrate(
                 buffers.clPosA(), buffers.clPosB(),
-                compute.errorCountBuffer(),   // repurposed as error counter
+                compute.errorCountBuffer(),
                 clParams, cloth.numParticles());
-            buffers.swapPingPong();  // posA now holds integrated positions
+            buffers.swapPingPong();
 
-            // ── Constraint solve: substeps × (forward + reverse pass) ─────
             for (int s = 0; s < simParams.substeps; ++s) {
-                // Forward pass: posA → posB, swap
                 compute.dispatchConstraints(
                     buffers.clPosA(), buffers.clPosB(),
                     buffers.clSprings(), clParams,
                     cloth.numSprings(), false);
                 buffers.swapPingPong();
 
-                // Reverse pass: posA → posB, swap
                 compute.dispatchConstraints(
                     buffers.clPosA(), buffers.clPosB(),
                     buffers.clSprings(), clParams,
@@ -411,30 +429,24 @@ int main()
                 buffers.swapPingPong();
             }
 
-            // ── Thickness: per-face area ratio → thickness_nm ────────────
-            // Reads posA (constraint-solved positions), writes to thicknessBuffer.
-            // clFaceIndices/clRestAreas are CL-only — not in acquire/release pair.
+            // ── Thickness + adhesion ──────────────────────────────────────
             compute.dispatchThickness(
                 buffers.clPosA(), clFaceIndices, clRestAreas,
                 buffers.clThickness(), cloth.numFaces());
-
-            // ── Adhesion: Park & Byun §3.2 cohesion springs ───────────────
-            // Reads pos.xyz from neighbours; writes vel.xyz only for contact particles.
-            // Each work item writes only to its own index — no write races.
             compute.dispatchAdhesion(buffers.clPosA(), clParams,
                                      cloth.numParticles());
 
-            // ── Transfer buffer ownership back: CL → GL ───────────────────
+            // ── Return buffer ownership to GL ─────────────────────────────
             buffers.releaseFromCL(compute.queue());
-
-            // ── Block until all CL work completes before drawing ──────────
             compute.finish();
 
-            // ── Update TBO to current posA ────────────────────────────────
-            // ping-pong swaps the GL buffer ID behind posBufferA() each frame;
-            // the TBO must be re-pointed at the new ID before drawing.
-            clothMesh.rebindTBO(buffers.posBufferA());
+            // ── End timing ────────────────────────────────────────────────
+            glEndQuery(GL_TIME_ELAPSED);
+            computeMs = static_cast<float>((glfwGetTime() - computeStart) * 1000.0);
+            GLuint64 glGpuNs = 0;
+            glGetQueryObjectui64v(timeQuery, GL_QUERY_RESULT, &glGpuNs);
 
+            clothMesh.rebindTBO(buffers.posBufferA());
         }
 
         // ── Clear frame ────────────────────────────────────────────────────
@@ -497,11 +509,12 @@ int main()
 
         // ── ImGui overlay ──────────────────────────────────────────────────
         ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
-        ImGui::SetNextWindowSize(ImVec2(340, 225), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(340, 265), ImGuiCond_Always);
         ImGui::Begin("Sim", nullptr,
             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoCollapse);
 
+        ImGui::Text("FPS: %.1f   GPU compute: %.2f ms", smoothedFps, computeMs);
         ImGui::Text("Cloth: %dx%d  Springs: %d",
                     cloth.gridSize(), cloth.gridSize(), cloth.numSprings());
         ImGui::Text("Status: %s  (P=pause W=wire R=reset T=heatmap)",
@@ -529,6 +542,7 @@ int main()
     }
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
+    glDeleteQueries(1, &timeQuery);
     clReleaseMemObject(clFaceIndices);
     clReleaseMemObject(clRestAreas);
     clReleaseMemObject(clParams);
